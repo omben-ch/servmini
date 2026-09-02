@@ -5,7 +5,24 @@
 #include <stdio.h>
 #include <netdb.h>
 #include <sys/socket.h>
+#include <sys/select.h>
 #include <netinet/in.h>
+
+typedef struct s_clients
+{
+	int id;
+	char *buf;
+} Clients;
+
+Clients clients[424242];
+char recv_buffer[424242];
+fd_set readfd, writefd, setfd;
+
+int maxfds = 0;
+int client_id = 0;
+int sockfd;
+
+
 
 int extract_message(char **buf, char **msg)
 {
@@ -54,43 +71,120 @@ char *str_join(char *buf, char *add)
 	return (newbuf);
 }
 
+void fatal(char *msg)
+{
+	write(2, msg, strlen(msg));
+	write(2, "\n", strlen("\n"));
+	exit(1);
+}
 
-int main() {
-	int sockfd, connfd, len;
-	struct sockaddr_in servaddr, cli; 
+void update_maxfds(int newclient)
+{
+	if (newclient > maxfds)
+		maxfds = newclient;
+}
 
+void send_message(int s_fd, char *msg)
+{
+	for (int fd = 0; fd <= maxfds; fd++)
+	{
+		if ((FD_ISSET(fd, &setfd)) && (fd != sockfd) && (fd != s_fd))
+			send(fd, msg, strlen(msg), 0);
+	}
+}
+
+void register_client()
+{
+	int client = accept(sockfd, NULL, NULL);
+	
+	if (client < 0)
+		fatal("Fatal error");
+	FD_SET(client, &setfd);
+	clients[client].id = client_id++;
+	update_maxfds(client);
+
+	char msg[100];
+	bzero(&msg, sizeof(msg));
+	sprintf(msg, "server: client %d just arrived\n" , clients[client].id);
+	send_message(client, msg);
+}
+
+int main(int ac, char** av) {
+	struct sockaddr_in servaddr; 
+
+	if (ac != 2)
+		fatal("Wrong number of arguments");
 	// socket create and verification 
 	sockfd = socket(AF_INET, SOCK_STREAM, 0); 
-	if (sockfd == -1) { 
-		printf("socket creation failed...\n"); 
-		exit(0); 
-	} 
-	else
-		printf("Socket successfully created..\n"); 
+	if (sockfd == -1) 
+		fatal("Fatal error");
 	bzero(&servaddr, sizeof(servaddr)); 
 
 	// assign IP, PORT 
 	servaddr.sin_family = AF_INET; 
 	servaddr.sin_addr.s_addr = htonl(2130706433); //127.0.0.1
-	servaddr.sin_port = htons(8081); 
+	servaddr.sin_port = htons(atoi(av[1])); 
 
 	// Binding newly created socket to given IP and verification 
-	if ((bind(sockfd, (const struct sockaddr *)&servaddr, sizeof(servaddr))) != 0) { 
-		printf("socket bind failed...\n"); 
-		exit(0); 
-	} 
-	else
-		printf("Socket successfully binded..\n");
-	if (listen(sockfd, 10) != 0) {
-		printf("cannot listen\n"); 
-		exit(0); 
+	if ((bind(sockfd, (const struct sockaddr *)&servaddr, sizeof(servaddr))) != 0)
+		fatal("Fatal error");
+	
+	if (listen(sockfd, 1024) != 0) 
+		fatal("Fatal error");
+
+	bzero(&clients, sizeof(clients));
+	FD_ZERO(&setfd);
+	FD_SET(sockfd, &setfd);
+	update_maxfds(sockfd);
+	while (1)
+	{
+		readfd = writefd = setfd;
+		
+		if (select(maxfds +1 , &readfd, &writefd, NULL , NULL) <= 0)
+			continue;
+		
+		for (int fd = 0; fd <= maxfds; fd++)
+		{
+			if (FD_ISSET(fd, &readfd))
+			{
+				if (fd == sockfd)
+				{
+					register_client();
+				}
+				else
+				{
+					bzero(&recv_buffer, sizeof(recv_buffer));
+					int size = recv(fd, recv_buffer, 424241, 0);
+					if (size <= 0)
+					{
+						char msg[100];
+
+						bzero(&msg, sizeof(msg));
+						if (clients[fd].buf != NULL)
+						{
+							free(clients[fd].buf);
+							clients[fd].buf = NULL;
+						}
+						close(fd);
+						FD_CLR(fd, &setfd);
+						sprintf(msg, "server: client %d just left\n", clients[fd].id);
+						send_message(fd, msg);
+					}
+					else
+					{
+						char *msg = NULL;
+						clients[fd].buf = str_join(clients[fd].buf, recv_buffer);
+						while(extract_message(&clients[fd].buf, &msg))
+						{
+							char tmp[ strlen(msg)+ 50];
+							sprintf(tmp, "client %d: %s", clients[fd].id, msg);
+							send_message(fd,tmp);
+							free(msg);
+						}
+					}
+				}
+			}
+		}
+
 	}
-	len = sizeof(cli);
-	connfd = accept(sockfd, (struct sockaddr *)&cli, &len);
-	if (connfd < 0) { 
-        printf("server acccept failed...\n"); 
-        exit(0); 
-    } 
-    else
-        printf("server acccept the client...\n");
 }
